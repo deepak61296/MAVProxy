@@ -39,7 +39,7 @@ class AIBackendModule(mp_module.MPModule):
             ('backend_url', str, 'http://localhost:5000'),
             ('mode', str, 'agent'),  # agent, ask, or script
             ('auto_confirm', bool, False),  # Auto-confirm low-risk commands
-            ('verbose', bool, False),
+            ('verbose', bool, True),  # Debug output enabled by default
         ])
         
         # Add commands
@@ -433,6 +433,10 @@ Examples:
         Called by MAVProxy when a command is not recognized.
         This is our hook to intercept plain English commands.
         """
+        # Debug output
+        if self.ai_settings.verbose:
+            self.say(f"AI Backend: unknown_command called with args: {args}")
+        
         if not self.ai_settings.enabled:
             return False  # Let MAVProxy handle it
         
@@ -442,13 +446,25 @@ Examples:
         
         command_text = ' '.join(args)
         
+        # Always log what we're checking
+        if self.ai_settings.verbose:
+            self.say(f"AI Backend: Checking if '{command_text}' is plain English")
+        
         # Check if it looks like plain English
-        if self.is_plain_english(command_text):
+        is_plain = self.is_plain_english(command_text)
+        
+        if self.ai_settings.verbose:
+            self.say(f"AI Backend: is_plain_english returned {is_plain}")
+        
+        # If AI backend is enabled, send ALL unknown commands to AI
+        # Let the AI decide if it can help or not
+        if self.ai_settings.enabled:
+            self.say(f"AI Backend: Processing '{command_text}'...")
             # Process through AI backend
             self.process_ai_command(command_text)
             return True  # We handled it
         
-        return False  # Not plain English, let MAVProxy show error
+        return False  # Not enabled, let MAVProxy show error
     
     def idle_task(self):
         """Called periodically by MAVProxy"""
