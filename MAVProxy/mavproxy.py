@@ -1382,6 +1382,8 @@ if __name__ == '__main__':
     parser.add_option("--default-modules", default="log,signing,wp,rally,fence,ftp,param,relay,tuneopt,arm,mode,calibration,rc,auxopt,misc,cmdlong,battery,terrain,output,adsb,layout", help='default module list')  # noqa:E501
     parser.add_option("--udp-timeout", dest="udp_timeout", default=0.0, type='float', help="Timeout for udp clients in seconds")  # noqa:E501
     parser.add_option("--retries", type=int, help="number of times to retry connection", default=3)
+    parser.add_option("--ai-backend", action='store_true', default=False,
+                      help="Enable AI backend for natural language drone control")
 
     (opts, args) = parser.parse_args()
     if len(args) != 0:
@@ -1566,6 +1568,11 @@ if __name__ == '__main__':
 
     if opts.map:
         process_stdin('module load map')
+
+    # Auto-load AI backend module if --ai-backend flag is used
+    if opts.ai_backend:
+        if mpstate.load_module('ai_backend', quiet=True):
+            process_stdin('ai_backend enable')
 
     if (mpstate.settings.state_basedir is not None and
             opts.aircraft is not None):

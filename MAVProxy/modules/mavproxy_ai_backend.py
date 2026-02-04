@@ -92,11 +92,15 @@ Examples:
         
         if cmd == "enable":
             self.ai_settings.enabled = True
+            # Register input handler to intercept ALL commands
+            self.mpstate.functions.input_handler = self.handle_input
             self.check_backend_health()
-            self.say("AI Backend: Enabled")
+            self.say("AI Backend: Enabled - Natural language commands active")
             
         elif cmd == "disable":
             self.ai_settings.enabled = False
+            # Remove input handler to restore normal MAVProxy behavior
+            self.mpstate.functions.input_handler = None
             self.say("AI Backend: Disabled")
             
         elif cmd == "status":
@@ -158,55 +162,105 @@ Examples:
         self.backend_available = False
         return False
     
+    def handle_input(self, line):
+        """
+        Input handler that intercepts ALL commands when AI backend is enabled.
+        This is the key hook that allows us to process 'arm the drone' before
+        it reaches MAVProxy's arm module.
+        
+        Logic:
+        1. If command starts with 'ai_backend', process normally (allow module control)
+        2. If command looks like plain English, send to AI backend
+        3. Otherwise, pass through to normal MAVProxy processing
+        """
+        line = line.strip()
+        if not line:
+            return
+        
+        # Always allow ai_backend commands to pass through normally
+        if line.lower().startswith('ai_backend'):
+            # Process through normal MAVProxy command system
+            self.mpstate.functions.input_handler = None  # Temporarily disable
+            try:
+                # Use queue to process through normal flow
+                self.mpstate.input_queue.put(line)
+            finally:
+                # Re-enable handler
+                self.mpstate.functions.input_handler = self.handle_input
+            return
+        
+        # Check if this looks like natural language
+        if self.is_plain_english(line):
+            # Process through AI backend
+            self.say(f"AI Backend: Processing '{line}'...")
+            self.process_ai_command(line)
+        else:
+            # Pass through to normal MAVProxy processing
+            # Temporarily disable handler to avoid recursion
+            self.mpstate.functions.input_handler = None
+            try:
+                self.mpstate.input_queue.put(line)
+            finally:
+                # Re-enable handler
+                self.mpstate.functions.input_handler = self.handle_input
+    
     def is_plain_english(self, text: str) -> bool:
         """
         Detect if a command is plain English (not a MAVProxy command)
         
-        Simple heuristics:
-        - Contains spaces and is longer than 3 words
-        - Contains question words (what, how, when, where, why)
-        - Contains common verbs (arm, takeoff, land, fly, move, go, etc.)
-        - Has natural language structure (articles, prepositions)
+        Key patterns that indicate natural language:
+        - Question words (what, how, when, where, why)
+        - Action phrases with articles (arm the, land the, takeoff to)
+        - Conversational markers (please, can you, I want)
+        - Sentence structure (the, to, at, for, with)
         """
         # Clean and normalize
         text = text.strip().lower()
         words = text.split()
         
-        # Too short
-        if len(words) < 3:
+        # Too short - probably a MAVProxy command
+        if len(words) < 2:
             return False
         
-        # Contains question words - definitely plain English
-        question_words = ['what', 'how', 'when', 'where', 'why', 'which', 'who']
-        if any(word in words for word in question_words):
+        # Single word commands are always MAVProxy
+        if len(words) == 1:
+            return False
+        
+        # Question words - definitely natural language
+        question_words = ['what', 'how', 'when', 'where', 'why', 'which', 'who', 'is', 'are', 'can']
+        if words[0] in question_words:
+            return True
+        if any(word in words for word in ['what', 'how', 'when', 'where', 'why']):
             return True
         
-        # Contains action phrases - check this BEFORE checking known commands
-        # This catches "arm the drone" even though "arm" is a MAVProxy command
+        # Conversational starters - definitely natural language
+        conversational = ['please', 'can', 'could', 'would', 'i', 'help', 'tell', 'show']
+        if words[0] in conversational:
+            return True
+        
+        # Action phrases with context - catches "arm the drone", "takeoff to 10m", etc.
         action_phrases = [
-            'arm the', 'takeoff to', 'land at', 'land the', 'fly to', 'move to',
-            'go to', 'return to', 'change mode', 'set altitude',
-            'get battery', 'show me', 'tell me', 'check the', 'please '
+            'arm the', 'arm my', 'disarm the', 'disarm my',
+            'takeoff to', 'take off to', 'takeoff',
+            'land the', 'land my', 'land now', 'land at',
+            'fly to', 'fly the', 'fly my',
+            'go to', 'move to', 'return to', 'return home',
+            'change mode', 'switch mode', 'set mode',
+            'get altitude', 'get battery', 'get status',
+            'show me', 'tell me', 'check the', 'check my',
+            'the drone', 'the copter', 'the vehicle', 'my drone'
         ]
         if any(phrase in text for phrase in action_phrases):
             return True
         
-        # Has sentence structure (contains articles, prepositions)
-        structure_words = ['the', 'to', 'at', 'in', 'on', 'for', 'with', 'please']
-        if any(word in words for word in structure_words) and len(words) >= 3:
+        # Has articles/prepositions - indicates sentence structure
+        structure_words = ['the', 'my', 'a', 'an']
+        if any(word in words for word in structure_words):
             return True
         
-        # Known MAVProxy commands to exclude (single word commands only)
-        # Only reject if it's EXACTLY a known command with no natural language
-        mavproxy_commands = [
-            'param', 'wp', 'rally', 'fence', 'module', 'set', 'status', 
-            'link', 'watch', 'graph', 'map', 'rc', 'servo', 'relay', 
-            'camera', 'gimbal', 'battery'
-        ]
-        
-        # If it starts with a known command but has no natural language markers, reject it
-        if words[0] in mavproxy_commands and len(words) < 4:
-            return False
+        # Two word commands with 'to' - like "takeoff 10" vs "takeoff to"
+        if 'to' in words and len(words) >= 2:
+            return True
         
         return False
     
