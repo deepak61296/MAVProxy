@@ -166,15 +166,8 @@ Examples:
         - Contains spaces and is longer than 3 words
         - Contains question words (what, how, when, where, why)
         - Contains common verbs (arm, takeoff, land, fly, move, go, etc.)
-        - Doesn't start with known MAVProxy commands
+        - Has natural language structure (articles, prepositions)
         """
-        # Known MAVProxy commands to exclude
-        mavproxy_commands = [
-            'arm', 'disarm', 'mode', 'param', 'wp', 'rally', 'fence',
-            'module', 'set', 'status', 'link', 'watch', 'graph', 'map',
-            'rc', 'servo', 'relay', 'camera', 'gimbal', 'battery'
-        ]
-        
         # Clean and normalize
         text = text.strip().lower()
         words = text.split()
@@ -183,28 +176,37 @@ Examples:
         if len(words) < 3:
             return False
         
-        # Starts with known MAVProxy command
-        if words[0] in mavproxy_commands:
-            return False
-        
-        # Contains question words
+        # Contains question words - definitely plain English
         question_words = ['what', 'how', 'when', 'where', 'why', 'which', 'who']
         if any(word in words for word in question_words):
             return True
         
-        # Contains action verbs with context
+        # Contains action phrases - check this BEFORE checking known commands
+        # This catches "arm the drone" even though "arm" is a MAVProxy command
         action_phrases = [
-            'arm the', 'takeoff to', 'land at', 'fly to', 'move to',
+            'arm the', 'takeoff to', 'land at', 'land the', 'fly to', 'move to',
             'go to', 'return to', 'change mode', 'set altitude',
-            'get battery', 'show me', 'tell me', 'check the'
+            'get battery', 'show me', 'tell me', 'check the', 'please '
         ]
         if any(phrase in text for phrase in action_phrases):
             return True
         
         # Has sentence structure (contains articles, prepositions)
-        structure_words = ['the', 'to', 'at', 'in', 'on', 'for', 'with']
-        if any(word in words for word in structure_words) and len(words) >= 4:
+        structure_words = ['the', 'to', 'at', 'in', 'on', 'for', 'with', 'please']
+        if any(word in words for word in structure_words) and len(words) >= 3:
             return True
+        
+        # Known MAVProxy commands to exclude (single word commands only)
+        # Only reject if it's EXACTLY a known command with no natural language
+        mavproxy_commands = [
+            'param', 'wp', 'rally', 'fence', 'module', 'set', 'status', 
+            'link', 'watch', 'graph', 'map', 'rc', 'servo', 'relay', 
+            'camera', 'gimbal', 'battery'
+        ]
+        
+        # If it starts with a known command but has no natural language markers, reject it
+        if words[0] in mavproxy_commands and len(words) < 4:
+            return False
         
         return False
     
