@@ -425,6 +425,29 @@ Examples:
         except Exception as e:
             self.say(f"AI Backend: Execution error - {str(e)}")
     
+    
+    def unknown_command(self, args):
+        """
+        Called by MAVProxy when a command is not recognized.
+        This is our hook to intercept plain English commands.
+        """
+        if not self.ai_settings.enabled:
+            return False  # Let MAVProxy handle it
+        
+        # Reconstruct the full command from args
+        if not args:
+            return False
+        
+        command_text = ' '.join(args)
+        
+        # Check if it looks like plain English
+        if self.is_plain_english(command_text):
+            # Process through AI backend
+            self.process_ai_command(command_text)
+            return True  # We handled it
+        
+        return False  # Not plain English, let MAVProxy show error
+    
     def idle_task(self):
         """Called periodically by MAVProxy"""
         # Periodic health check
