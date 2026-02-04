@@ -56,6 +56,9 @@ class AIBackendModule(mp_module.MPModule):
         # Command history
         self.command_history = []
         
+        # Pending command for confirmation (state-based confirmation)
+        self.pending_command = None  # {type, params, cmd_str}
+        
         # Check if requests is available
         if requests is None:
             self.say("AI Backend: requests library not available. Module disabled.")
@@ -169,12 +172,18 @@ Examples:
         it reaches MAVProxy's arm module.
         
         Logic:
-        1. If command starts with 'ai_backend', process normally (allow module control)
-        2. If command looks like plain English, send to AI backend
-        3. Otherwise, pass through to normal MAVProxy processing
+        1. If there's a pending command, treat input as y/n confirmation
+        2. If command starts with 'ai_backend', process normally (allow module control)
+        3. If command looks like plain English, send to AI backend
+        4. Otherwise, pass through to normal MAVProxy processing
         """
         line = line.strip()
         if not line:
+            return
+        
+        # Check if we're waiting for confirmation
+        if self.pending_command is not None:
+            self.handle_confirmation(line)
             return
         
         # Always allow ai_backend commands to pass through normally
@@ -203,6 +212,23 @@ Examples:
             finally:
                 # Re-enable handler
                 self.mpstate.functions.input_handler = self.handle_input
+    
+    def handle_confirmation(self, response):
+        """Handle y/n confirmation for pending command"""
+        response = response.strip().lower()
+        
+        if response in ['y', 'yes']:
+            cmd = self.pending_command
+            self.pending_command = None
+            self.say(f"AI Backend: Executing {cmd['cmd_str']}...")
+            self.execute_command(cmd['type'], cmd['params'])
+        elif response in ['n', 'no']:
+            self.pending_command = None
+            self.say("AI Backend: Command cancelled")
+        else:
+            # Not y or n, show prompt again
+            cmd_str = self.pending_command['cmd_str']
+            self.say(f"Please enter 'y' to confirm or 'n' to cancel: {cmd_str}")
     
     def is_plain_english(self, text: str) -> bool:
         """
@@ -391,12 +417,13 @@ Examples:
                 self.say(f"AI Backend: Auto-executing {cmd_str}")
                 self.execute_command(cmd_type, params)
             else:
-                # Prompt for confirmation
-                confirm = input(f"Execute command: {cmd_str}? [y/n]: ").strip().lower()
-                if confirm == 'y' or confirm == 'yes':
-                    self.execute_command(cmd_type, params)
-                else:
-                    self.say("AI Backend: Command cancelled")
+                # Set pending command and prompt for confirmation
+                self.pending_command = {
+                    'type': cmd_type,
+                    'params': params,
+                    'cmd_str': cmd_str
+                }
+                self.say(f"Execute command: {cmd_str}? [y/n]: ")
     
     def format_command(self, cmd_type: str, params: Dict[str, Any]) -> str:
         """Format command for display"""
