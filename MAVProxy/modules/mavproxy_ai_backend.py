@@ -3,18 +3,18 @@
 AI Backend Integration Module for MAVProxy
 Enables natural language drone control via ArduPilot AI Backend
 
-This module detects plain English commands, sends them to the AI backend
-for processing, and executes the resulting commands after user confirmation.
-
-Author: ArduPilot AI Backend Team
-Date: 2026-02-05
-Version: 1.2.0
+This module intercepts unknown commands and sends them to the AI backend.
+Original MAVProxy commands work normally.
 
 Usage:
     module load ai_backend
     ai_backend enable
-    arm the drone
-    y
+    arm drone
+    takeoff to 10 meters
+    land now
+
+Author: ArduPilot AI Backend Team
+Version: 2.0.0
 '''
 
 import time
@@ -41,56 +41,42 @@ class AIBackendModule(mp_module.MPModule):
             ('enabled', bool, False),
             ('backend_url', str, 'http://localhost:5000'),
             ('mode', str, 'agent'),  # agent, ask, or script
-            ('auto_confirm', bool, False),  # Auto-confirm low-risk commands
-            ('verbose', bool, True),  # Debug output enabled by default
+            ('safe_mode', bool, False),  # Require y/n confirmation
+            ('verbose', bool, False),
         ])
 
         # Add commands
         self.add_command('ai_backend', self.cmd_ai_backend,
                         "AI Backend control",
                         ['enable', 'disable', 'status', 'url <URL>',
-                         'mode <agent|ask|script>', 'set (SETTING)'])
+                         'mode <agent|ask|script>', 'safe', 'unsafe'])
 
         # State tracking
         self.backend_available = False
         self.last_health_check = 0
-        self.health_check_interval = 30  # seconds
+        self.health_check_interval = 30
 
-        # Command history
-        self.command_history = []
+        # Pending command for safe_mode confirmation
+        self.pending_command = None
 
-        # Pending command for confirmation (state-based confirmation)
-        self.pending_command = None  # {type, params, cmd_str}
-
-        # Flag to prevent re-entry during input processing
-        self.processing_input = False
-
-        # Check if requests is available
         if requests is None:
-            self.say("AI Backend: requests library not available. Module disabled.")
+            print("AI Backend: requests library not available")
             return
 
-        # Initial health check if enabled
-        if self.ai_settings.enabled:
-            self.check_backend_health()
-
     def usage(self):
-        """Show help on command line options"""
         return """Usage: ai_backend <command>
 Commands:
-  enable              - Enable AI backend integration
-  disable             - Disable AI backend integration
-  status              - Show current status
-  url <URL>           - Set backend URL (default: http://localhost:5000)
-  mode <mode>         - Set mode: agent (execute), ask (query), script (generate)
-  set <setting>       - Configure settings
-  confirm             - Confirm pending command (same as 'y')
-  cancel              - Cancel pending command (same as 'n')
+  enable    - Enable AI backend (unknown commands go to AI)
+  disable   - Disable AI backend
+  status    - Show current status
+  url <URL> - Set backend URL
+  mode <m>  - Set mode: agent, ask, script
+  safe      - Enable safe mode (y/n confirmation)
+  unsafe    - Disable safe mode (direct execution)
 
 Examples:
   ai_backend enable
   ai_backend url http://192.168.1.100:5000
-  ai_backend mode agent
 """
 
     def cmd_ai_backend(self, args):
@@ -103,17 +89,13 @@ Examples:
 
         if cmd == "enable":
             self.ai_settings.enabled = True
-            # Register input handler to intercept ALL commands
-            self.mpstate.functions.input_handler = self.handle_input
             self.check_backend_health()
-            self.say("AI Backend: Enabled - Natural language commands active")
+            print("AI Backend: Enabled - unknown commands will be processed by AI")
 
         elif cmd == "disable":
             self.ai_settings.enabled = False
-            # Remove input handler to restore normal MAVProxy behavior
-            self.mpstate.functions.input_handler = None
             self.pending_command = None
-            self.say("AI Backend: Disabled")
+            print("AI Backend: Disabled")
 
         elif cmd == "status":
             self.show_status()
@@ -123,7 +105,7 @@ Examples:
                 print("Usage: ai_backend url <URL>")
                 return
             self.ai_settings.backend_url = args[1]
-            self.say(f"AI Backend: URL set to {args[1]}")
+            print(f"AI Backend: URL set to {args[1]}")
             self.check_backend_health()
 
         elif cmd == "mode":
@@ -133,213 +115,103 @@ Examples:
             mode = args[1].lower()
             if mode in ['agent', 'ask', 'script']:
                 self.ai_settings.mode = mode
-                self.say(f"AI Backend: Mode set to {mode}")
+                print(f"AI Backend: Mode set to {mode}")
             else:
                 print("Invalid mode. Use: agent, ask, or script")
 
-        elif cmd == "confirm":
-            # Manual confirm command
+        elif cmd == "safe":
+            self.ai_settings.safe_mode = True
+            print("AI Backend: Safe mode ON - commands require y/n confirmation")
+
+        elif cmd == "unsafe":
+            self.ai_settings.safe_mode = False
+            print("AI Backend: Safe mode OFF - commands execute directly")
+
+        elif cmd == "y" or cmd == "yes":
             if self.pending_command:
                 self.execute_pending_command()
             else:
-                self.say("AI Backend: No pending command to confirm")
+                print("AI Backend: No pending command")
 
-        elif cmd == "cancel":
-            # Manual cancel command
+        elif cmd == "n" or cmd == "no":
             if self.pending_command:
                 self.pending_command = None
-                self.say("AI Backend: Command cancelled")
+                print("AI Backend: Command cancelled")
             else:
-                self.say("AI Backend: No pending command to cancel")
-
-        elif cmd == "set":
-            self.ai_settings.command(args[1:])
+                print("AI Backend: No pending command")
 
         else:
             print(self.usage())
 
     def show_status(self):
         """Display current status"""
-        pending = "None"
-        if self.pending_command:
-            pending = self.pending_command['cmd_str']
-
-        status = f"""AI Backend Status:
-  Enabled:        {self.ai_settings.enabled}
-  Backend URL:    {self.ai_settings.backend_url}
-  Mode:           {self.ai_settings.mode}
-  Backend Health: {'Available' if self.backend_available else 'Unavailable'}
-  Auto-confirm:   {self.ai_settings.auto_confirm}
-  Pending Cmd:    {pending}
-"""
-        print(status)
+        pending = self.pending_command['cmd_str'] if self.pending_command else "None"
+        print(f"""AI Backend Status:
+  Enabled:      {self.ai_settings.enabled}
+  Backend URL:  {self.ai_settings.backend_url}
+  Mode:         {self.ai_settings.mode}
+  Safe Mode:    {self.ai_settings.safe_mode}
+  Backend:      {'Connected' if self.backend_available else 'Disconnected'}
+  Pending:      {pending}""")
 
     def check_backend_health(self):
         """Check if backend is available"""
         if requests is None:
             return False
-
         try:
             url = f"{self.ai_settings.backend_url}/health"
             response = requests.get(url, timeout=2)
             if response.status_code == 200:
                 self.backend_available = True
-                if self.ai_settings.verbose:
-                    self.say("AI Backend: Connected")
+                print("AI Backend: Connected")
                 return True
         except Exception as e:
             if self.ai_settings.verbose:
-                self.say(f"AI Backend: Connection failed - {str(e)}")
-
+                print(f"AI Backend: Connection failed - {e}")
         self.backend_available = False
         return False
 
-    def execute_pending_command(self):
-        """Execute the pending command"""
-        if not self.pending_command:
-            return
-
-        cmd = self.pending_command
-        self.pending_command = None
-        print(f"AI Backend: Executing {cmd['cmd_str']}...")
-        self.execute_command(cmd['type'], cmd['params'])
-
-    def handle_input(self, line):
+    def unknown_command(self, args):
         """
-        Input handler that intercepts ALL commands when AI backend is enabled.
+        Called by MAVProxy when a command is not recognized.
+        This is the hook to send unknown commands to AI backend.
         """
-        # Prevent re-entry
-        if self.processing_input:
-            return
+        if not self.ai_settings.enabled:
+            return False  # Let MAVProxy show "Unknown command"
 
-        line = line.strip()
-        if not line:
-            return
+        if not args:
+            return False
 
-        # Debug: show what we received
-        if self.ai_settings.verbose:
-            print(f"[AI Debug] Input received: '{line}' (pending: {self.pending_command is not None})")
+        # Handle y/n for safe mode
+        if len(args) == 1 and args[0].lower() in ['y', 'yes']:
+            if self.pending_command:
+                self.execute_pending_command()
+                return True
+            return False
 
-        # Check if we're waiting for confirmation
-        if self.pending_command is not None:
-            self.handle_confirmation(line)
-            return
-
-        # Always allow ai_backend commands to pass through normally
-        if line.lower().startswith('ai_backend'):
-            self.pass_to_mavproxy(line)
-            return
-
-        # Check if this looks like natural language
-        is_english = self.is_plain_english(line)
-        if self.ai_settings.verbose:
-            print(f"[AI Debug] is_plain_english('{line}') = {is_english}")
-
-        if is_english:
-            # Process through AI backend
-            self.say(f"AI Backend: Processing '{line}'...")
-            self.process_ai_command(line)
-        else:
-            # Pass through to normal MAVProxy processing
-            if self.ai_settings.verbose:
-                print(f"[AI Debug] Passing to MAVProxy: '{line}'")
-            self.pass_to_mavproxy(line)
-
-    def pass_to_mavproxy(self, line):
-        """Pass a command to normal MAVProxy processing"""
-        self.processing_input = True
-        try:
-            # Temporarily disable handler
-            self.mpstate.functions.input_handler = None
-            # Process through MAVProxy
-            self.mpstate.input_queue.put(line)
-        finally:
-            # Re-enable handler after a small delay
-            # Use idle_task to re-enable to avoid race condition
-            self._reenable_handler = True
-            self.processing_input = False
-
-    def handle_confirmation(self, response):
-        """Handle y/n confirmation for pending command"""
-        original = response
-        response = response.strip().lower()
-
-        # Debug output
-        if self.ai_settings.verbose:
-            print(f"[AI Debug] Confirmation input: '{original}' -> '{response}'")
-
-        # Be more lenient - check if starts with y or n
-        if response.startswith('y'):
-            self.execute_pending_command()
-        elif response.startswith('n'):
-            self.pending_command = None
-            print("AI Backend: Command cancelled")
-        else:
-            # Not y or n - check if it's a new command
-            # If user types a new plain English command, process it instead
-            if self.is_plain_english(original):
-                # Cancel current pending and process new command
-                print("AI Backend: Previous command cancelled, processing new command...")
+        if len(args) == 1 and args[0].lower() in ['n', 'no']:
+            if self.pending_command:
                 self.pending_command = None
-                self.process_ai_command(original)
-            else:
-                # Show prompt again
-                cmd_str = self.pending_command['cmd_str']
-                print(f">>> Enter 'y' to execute {cmd_str}, 'n' to cancel <<<")
-
-    def is_plain_english(self, text: str) -> bool:
-        """
-        Detect if a command is plain English (not a MAVProxy command)
-        """
-        # Clean and normalize
-        text = text.strip().lower()
-        words = text.split()
-
-        # Too short - probably a MAVProxy command
-        if len(words) < 2:
+                print("AI Backend: Command cancelled")
+                return True
             return False
 
-        # Single word commands are always MAVProxy
-        if len(words) == 1:
-            return False
+        # Reconstruct the command
+        command_text = ' '.join(args)
 
-        # Question words - definitely natural language
-        question_words = ['what', 'how', 'when', 'where', 'why', 'which', 'who', 'is', 'are', 'can']
-        if words[0] in question_words:
-            return True
-        if any(word in words for word in ['what', 'how', 'when', 'where', 'why']):
-            return True
+        if self.ai_settings.verbose:
+            print(f"[AI] Unknown command: '{command_text}'")
 
-        # Conversational starters - definitely natural language
-        conversational = ['please', 'can', 'could', 'would', 'i', 'help', 'tell', 'show']
-        if words[0] in conversational:
-            return True
+        # Check backend health
+        if not self.backend_available:
+            if not self.check_backend_health():
+                print("AI Backend: Not connected")
+                return False
 
-        # Action phrases with context - catches "arm the drone", "takeoff to 10m", etc.
-        action_phrases = [
-            'arm the', 'arm my', 'disarm the', 'disarm my',
-            'takeoff to', 'take off to', 'takeoff',
-            'land the', 'land my', 'land now', 'land at',
-            'fly to', 'fly the', 'fly my',
-            'go to', 'move to', 'return to', 'return home',
-            'change mode', 'switch mode', 'set mode',
-            'get altitude', 'get battery', 'get status',
-            'show me', 'tell me', 'check the', 'check my',
-            'the drone', 'the copter', 'the vehicle', 'my drone'
-        ]
-        if any(phrase in text for phrase in action_phrases):
-            return True
-
-        # Has articles/prepositions - indicates sentence structure
-        structure_words = ['the', 'my', 'a', 'an']
-        if any(word in words for word in structure_words):
-            return True
-
-        # Two word commands with 'to' - like "takeoff 10" vs "takeoff to"
-        if 'to' in words and len(words) >= 2:
-            return True
-
-        return False
+        # Send to AI backend
+        print(f"AI Backend: Processing '{command_text}'...")
+        self.process_ai_command(command_text)
+        return True  # We handled it
 
     def get_telemetry(self) -> Dict[str, Any]:
         """Gather current telemetry from MAVProxy"""
@@ -352,7 +224,6 @@ Examples:
         }
 
         try:
-            # Battery
             if 'SYS_STATUS' in self.master.messages:
                 msg = self.master.messages['SYS_STATUS']
                 telemetry["battery"] = {
@@ -361,7 +232,6 @@ Examples:
                     "remaining": msg.battery_remaining
                 }
 
-            # GPS
             if 'GPS_RAW_INT' in self.master.messages:
                 msg = self.master.messages['GPS_RAW_INT']
                 telemetry["gps"] = {
@@ -372,18 +242,14 @@ Examples:
                     "fix_type": msg.fix_type
                 }
 
-            # Status
             if 'HEARTBEAT' in self.master.messages:
-                msg = self.master.messages['HEARTBEAT']
                 mode = self.master.flightmode
                 armed = self.master.motors_armed()
                 telemetry["status"] = {
                     "mode": mode,
-                    "armed": armed,
-                    "system_status": msg.system_status
+                    "armed": armed
                 }
 
-            # Position
             if 'GLOBAL_POSITION_INT' in self.master.messages:
                 msg = self.master.messages['GLOBAL_POSITION_INT']
                 telemetry["position"] = {
@@ -393,79 +259,42 @@ Examples:
                     "relative_altitude": msg.relative_alt / 1000.0
                 }
 
-            # Attitude
-            if 'ATTITUDE' in self.master.messages:
-                msg = self.master.messages['ATTITUDE']
-                telemetry["attitude"] = {
-                    "roll": msg.roll,
-                    "pitch": msg.pitch,
-                    "yaw": msg.yaw
-                }
-
         except Exception as e:
             if self.ai_settings.verbose:
-                self.say(f"AI Backend: Telemetry error - {str(e)}")
+                print(f"AI Backend: Telemetry error - {e}")
 
         return telemetry
 
     def send_to_backend(self, message: str) -> Optional[Dict[str, Any]]:
-        """Send message to AI backend and get response"""
+        """Send message to AI backend"""
         if requests is None:
             return None
 
         try:
             url = f"{self.ai_settings.backend_url}/chat"
-
             payload = {
                 "message": message,
                 "mode": self.ai_settings.mode,
                 "telemetry": self.get_telemetry()
             }
-
             response = requests.post(url, json=payload, timeout=15)
-
             if response.status_code == 200:
                 return response.json()
             else:
-                self.say(f"AI Backend: Error {response.status_code}")
+                print(f"AI Backend: Error {response.status_code}")
                 return None
-
         except Exception as e:
-            self.say(f"AI Backend: Request failed - {str(e)}")
+            print(f"AI Backend: Request failed - {e}")
             return None
 
     def process_ai_command(self, user_input: str):
-        """Process a plain English command through AI backend"""
-        if self.ai_settings.verbose:
-            print(f"[AI Debug] process_ai_command called with: '{user_input}'")
-
-        if not self.ai_settings.enabled:
-            if self.ai_settings.verbose:
-                print("[AI Debug] AI backend not enabled, returning")
-            return
-
-        if not self.backend_available:
-            if self.ai_settings.verbose:
-                print("[AI Debug] Backend not available, checking health...")
-            # Try to reconnect
-            if not self.check_backend_health():
-                self.say("AI Backend: Backend not available. Check connection.")
-                return
-
-        if self.ai_settings.verbose:
-            print("[AI Debug] Sending to backend...")
-
-        # Send to backend
+        """Process command through AI backend"""
         response = self.send_to_backend(user_input)
 
-        if self.ai_settings.verbose:
-            print(f"[AI Debug] Backend response: {response}")
-
         if not response:
-            print("AI Backend: No response from backend")
             return
 
-        # Display AI response - use print() to show in main console
+        # Display AI response
         ai_response = response.get('response', 'No response')
         print(f"AI: {ai_response}")
 
@@ -474,22 +303,29 @@ Examples:
         if command and command.get('type'):
             cmd_type = command['type']
             params = command.get('params', {})
-
-            # Format command for display
             cmd_str = self.format_command(cmd_type, params)
 
-            # Ask for confirmation (unless auto-confirm is enabled for low-risk)
-            if self.ai_settings.auto_confirm and self.is_low_risk_command(cmd_type):
-                print(f"AI Backend: Auto-executing {cmd_str}")
-                self.execute_command(cmd_type, params)
-            else:
-                # Set pending command and prompt for confirmation
+            if self.ai_settings.safe_mode:
+                # Safe mode: ask for confirmation
                 self.pending_command = {
                     'type': cmd_type,
                     'params': params,
                     'cmd_str': cmd_str
                 }
-                print(f">>> Execute command: {cmd_str}? Type 'y' to confirm, 'n' to cancel <<<")
+                print(f">>> Execute {cmd_str}? Type 'y' or 'n' <<<")
+            else:
+                # Direct execution
+                print(f"Executing: {cmd_str}")
+                self.execute_command(cmd_type, params)
+
+    def execute_pending_command(self):
+        """Execute pending command (safe mode)"""
+        if not self.pending_command:
+            return
+        cmd = self.pending_command
+        self.pending_command = None
+        print(f"Executing: {cmd['cmd_str']}")
+        self.execute_command(cmd['type'], cmd['params'])
 
     def format_command(self, cmd_type: str, params: Dict[str, Any]) -> str:
         """Format command for display"""
@@ -499,33 +335,24 @@ Examples:
             return "DISARM"
         elif cmd_type == "TAKEOFF":
             alt = params.get('altitude', 10)
-            return f"TAKEOFF to {alt}m"
+            return f"TAKEOFF {alt}m"
         elif cmd_type == "LAND":
             return "LAND"
         elif cmd_type == "RTL":
-            return "RTL (Return to Launch)"
+            return "RTL"
         elif cmd_type == "GOTO":
             lat = params.get('latitude')
             lon = params.get('longitude')
-            alt = params.get('altitude', 'current')
-            return f"GOTO ({lat}, {lon}, {alt}m)"
+            alt = params.get('altitude', 0)
+            return f"GOTO {lat},{lon} at {alt}m"
         elif cmd_type == "CHANGE_MODE":
             mode = params.get('mode')
-            return f"CHANGE_MODE to {mode}"
-        elif cmd_type == "MOVE_DIRECTION":
-            direction = params.get('direction', 'unknown')
-            distance = params.get('distance', 0)
-            return f"MOVE {direction} {distance}m"
+            return f"MODE {mode}"
         else:
-            return f"{cmd_type} {params}"
-
-    def is_low_risk_command(self, cmd_type: str) -> bool:
-        """Check if command is low risk (safe to auto-execute)"""
-        low_risk = ['GET_PARAM']
-        return cmd_type in low_risk
+            return f"{cmd_type}"
 
     def execute_command(self, cmd_type: str, params: Dict[str, Any]):
-        """Execute a command via MAVProxy"""
+        """Execute command via MAVProxy"""
         try:
             if cmd_type == "ARM":
                 self.mpstate.functions.process_stdin("arm throttle")
@@ -535,17 +362,14 @@ Examples:
 
             elif cmd_type == "TAKEOFF":
                 altitude = params.get('altitude', 10)
-                # Note: MAVProxy doesn't have a direct takeoff command
-                # We need to use mode guided and then send takeoff via MAVLink
                 self.mpstate.functions.process_stdin("mode GUIDED")
-                time.sleep(0.5)
+                time.sleep(0.3)
                 self.master.mav.command_long_send(
                     self.target_system,
                     self.target_component,
                     mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
                     0, 0, 0, 0, 0, 0, 0, altitude
                 )
-                print(f"AI Backend: Sent TAKEOFF to {altitude}m")
 
             elif cmd_type == "LAND":
                 self.mpstate.functions.process_stdin("mode LAND")
@@ -554,14 +378,13 @@ Examples:
                 self.mpstate.functions.process_stdin("mode RTL")
 
             elif cmd_type == "CHANGE_MODE":
-                mode = params.get('mode')
+                mode = params.get('mode', '')
                 self.mpstate.functions.process_stdin(f"mode {mode}")
 
             elif cmd_type == "GOTO":
                 lat = params.get('latitude')
                 lon = params.get('longitude')
                 alt = params.get('altitude', 0)
-                # Send MAVLink GOTO command
                 self.master.mav.mission_item_send(
                     self.target_system,
                     self.target_component,
@@ -570,43 +393,32 @@ Examples:
                     2, 0, 0, 0, 0, 0,
                     lat, lon, alt
                 )
-                print(f"AI Backend: Sent GOTO ({lat}, {lon}, {alt}m)")
-
-            elif cmd_type == "MOVE_DIRECTION":
-                # Movement commands require GUIDED mode and velocity commands
-                direction = params.get('direction', '').lower()
-                distance = params.get('distance', 5)
-                print(f"AI Backend: MOVE_DIRECTION not fully implemented yet")
-                print(f"AI Backend: Would move {direction} by {distance}m")
 
             else:
-                print(f"AI Backend: Command {cmd_type} not yet implemented")
+                print(f"AI Backend: Command {cmd_type} not implemented")
 
         except Exception as e:
-            print(f"AI Backend: Execution error - {str(e)}")
+            print(f"AI Backend: Execution error - {e}")
 
     def idle_task(self):
-        """Called periodically by MAVProxy"""
-        # Re-enable input handler if needed
-        if hasattr(self, '_reenable_handler') and self._reenable_handler:
-            self._reenable_handler = False
-            if self.ai_settings.enabled:
-                self.mpstate.functions.input_handler = self.handle_input
-
-        # Periodic health check
+        """Periodic tasks"""
         if self.ai_settings.enabled:
             now = time.time()
             if now - self.last_health_check > self.health_check_interval:
                 self.last_health_check = now
-                self.check_backend_health()
+                # Silent health check
+                if requests:
+                    try:
+                        url = f"{self.ai_settings.backend_url}/health"
+                        response = requests.get(url, timeout=2)
+                        self.backend_available = response.status_code == 200
+                    except:
+                        self.backend_available = False
 
     def unload(self):
-        """Called when module is unloaded"""
-        # Clean up input handler
-        if self.mpstate.functions.input_handler == self.handle_input:
-            self.mpstate.functions.input_handler = None
+        """Cleanup on unload"""
+        pass
 
 
 def init(mpstate):
-    """Initialize module"""
     return AIBackendModule(mpstate)
