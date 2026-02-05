@@ -14,7 +14,7 @@ Usage:
     land now
 
 Author: ArduPilot AI Backend Team
-Version: 2.0.0
+Version: 2.1.0
 '''
 
 import time
@@ -345,9 +345,28 @@ Examples:
             lon = params.get('longitude')
             alt = params.get('altitude', 0)
             return f"GOTO {lat},{lon} at {alt}m"
+        elif cmd_type == "GOTO_HOME":
+            return "GOTO HOME"
         elif cmd_type == "CHANGE_MODE":
             mode = params.get('mode')
             return f"MODE {mode}"
+        elif cmd_type == "MOVE_DIRECTION":
+            direction = params.get('direction', 'unknown')
+            distance = params.get('distance', 0)
+            return f"MOVE {direction.upper()} {distance}m"
+        elif cmd_type == "ALTITUDE_CHANGE":
+            change = params.get('change', 0)
+            direction = "UP" if change > 0 else "DOWN"
+            return f"ALTITUDE {direction} {abs(change)}m"
+        elif cmd_type == "GET_PARAM":
+            param = params.get('parameter', 'unknown')
+            return f"GET {param}"
+        elif cmd_type == "SET_PARAM":
+            param = params.get('parameter', 'unknown')
+            value = params.get('value', 0)
+            return f"SET {param}={value}"
+        elif cmd_type == "REBOOT":
+            return "REBOOT"
         else:
             return f"{cmd_type}"
 
@@ -385,13 +404,51 @@ Examples:
                 lat = params.get('latitude')
                 lon = params.get('longitude')
                 alt = params.get('altitude', 0)
-                self.master.mav.mission_item_send(
+                # Use guided mode position target
+                self.mpstate.functions.process_stdin("mode GUIDED")
+                time.sleep(0.2)
+                self.master.mav.mission_item_int_send(
                     self.target_system,
                     self.target_component,
-                    0, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                    0,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
                     mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
                     2, 0, 0, 0, 0, 0,
-                    lat, lon, alt
+                    int(lat * 1e7), int(lon * 1e7), alt
+                )
+
+            elif cmd_type == "GOTO_HOME":
+                # Return to home position
+                self.mpstate.functions.process_stdin("mode RTL")
+
+            elif cmd_type == "MOVE_DIRECTION":
+                # Move in a direction (requires GUIDED mode and position offset)
+                direction = params.get('direction', '').lower()
+                distance = params.get('distance', 10)
+                self._move_direction(direction, distance)
+
+            elif cmd_type == "ALTITUDE_CHANGE":
+                # Change altitude
+                change = params.get('change', 0)
+                self._change_altitude(change)
+
+            elif cmd_type == "GET_PARAM":
+                param_name = params.get('parameter', '')
+                if param_name:
+                    self.mpstate.functions.process_stdin(f"param show {param_name}")
+
+            elif cmd_type == "SET_PARAM":
+                param_name = params.get('parameter', '')
+                value = params.get('value', 0)
+                if param_name:
+                    self.mpstate.functions.process_stdin(f"param set {param_name} {value}")
+
+            elif cmd_type == "REBOOT":
+                self.master.mav.command_long_send(
+                    self.target_system,
+                    self.target_component,
+                    mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+                    0, 1, 0, 0, 0, 0, 0, 0
                 )
 
             else:
@@ -399,6 +456,84 @@ Examples:
 
         except Exception as e:
             print(f"AI Backend: Execution error - {e}")
+
+    def _move_direction(self, direction: str, distance: float):
+        """Move in a cardinal direction"""
+        import math
+
+        try:
+            # Get current position
+            if 'GLOBAL_POSITION_INT' not in self.master.messages:
+                print("AI Backend: No position data available")
+                return
+
+            msg = self.master.messages['GLOBAL_POSITION_INT']
+            lat = msg.lat / 1e7
+            lon = msg.lon / 1e7
+            alt = msg.relative_alt / 1000.0
+
+            # Calculate offset (approximate meters to degrees)
+            # 1 degree lat ~ 111km, 1 degree lon varies with latitude
+            lat_offset = distance / 111000.0
+            lon_offset = distance / (111000.0 * math.cos(math.radians(lat)))
+
+            if direction == 'north':
+                lat += lat_offset
+            elif direction == 'south':
+                lat -= lat_offset
+            elif direction == 'east':
+                lon += lon_offset
+            elif direction == 'west':
+                lon -= lon_offset
+            else:
+                print(f"AI Backend: Unknown direction '{direction}'")
+                return
+
+            # Send to new position
+            self.mpstate.functions.process_stdin("mode GUIDED")
+            time.sleep(0.2)
+            self.master.mav.mission_item_int_send(
+                self.target_system,
+                self.target_component,
+                0,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+                2, 0, 0, 0, 0, 0,
+                int(lat * 1e7), int(lon * 1e7), alt
+            )
+
+        except Exception as e:
+            print(f"AI Backend: Move direction error - {e}")
+
+    def _change_altitude(self, change: float):
+        """Change altitude by specified amount"""
+        try:
+            # Get current position
+            if 'GLOBAL_POSITION_INT' not in self.master.messages:
+                print("AI Backend: No position data available")
+                return
+
+            msg = self.master.messages['GLOBAL_POSITION_INT']
+            lat = msg.lat / 1e7
+            lon = msg.lon / 1e7
+            current_alt = msg.relative_alt / 1000.0
+            new_alt = max(0, current_alt + change)
+
+            # Send position command with new altitude
+            self.mpstate.functions.process_stdin("mode GUIDED")
+            time.sleep(0.2)
+            self.master.mav.mission_item_int_send(
+                self.target_system,
+                self.target_component,
+                0,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+                2, 0, 0, 0, 0, 0,
+                int(lat * 1e7), int(lon * 1e7), new_alt
+            )
+
+        except Exception as e:
+            print(f"AI Backend: Altitude change error - {e}")
 
     def idle_task(self):
         """Periodic tasks"""
