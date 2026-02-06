@@ -247,20 +247,22 @@ When enabled, you can use natural language:
     def _process_mavproxy(self, line):
         """Send command to MAVProxy's normal processing"""
         # Temporarily remove our handler to avoid recursion
-        self.mpstate.functions.input_handler = self.original_input_handler
+        saved_handler = self.mpstate.functions.input_handler
+        self.mpstate.functions.input_handler = None
         try:
-            # Import and call process_stdin
-            from MAVProxy.mavproxy import process_stdin
-            process_stdin(line)
+            # Use MAVProxy's process_stdin function
+            self.mpstate.functions.process_stdin(line)
         finally:
             # Reinstall our handler
-            self.mpstate.functions.input_handler = self._input_handler
+            self.mpstate.functions.input_handler = saved_handler
 
     def _is_natural_language(self, line: str) -> bool:
         """
         Determine if the input is natural language vs a valid MAVProxy command.
         Returns True if it should go to AI backend.
         """
+        import re
+
         try:
             args = shlex.split(line.lower())
         except:
@@ -281,11 +283,14 @@ When enabled, you can use natural language:
         if first_word in builtin_always:
             return False
 
-        # If command has natural language indicators, likely AI
+        # Check for number+unit patterns like "20m", "10ft", "5meters"
+        has_measurement = any(re.match(r'\d+\.?\d*(m|ft|meters?|feet|s|seconds?)', arg) for arg in args)
+
+        # If command has natural language indicators or measurements, likely AI
         words_set = set(args)
         nl_matches = words_set & self.nl_indicators
-        if len(nl_matches) >= 1 and len(args) > 1:
-            # Has natural language words - probably for AI
+        if (len(nl_matches) >= 1 or has_measurement) and len(args) > 1:
+            # Has natural language words or measurements - probably for AI
             # But check if it's still a valid MAVProxy command
             if first_word in self.valid_subcommands:
                 valid_subs = self.valid_subcommands[first_word]
@@ -306,6 +311,11 @@ When enabled, you can use natural language:
                     return False
                 # Invalid subcommand like "arm the" - send to AI
                 return True
+
+        # Common flight commands that should go to AI if followed by anything
+        flight_words = {'takeoff', 'land', 'arm', 'disarm', 'fly', 'go', 'move'}
+        if first_word in flight_words and len(args) > 1:
+            return True
 
         # Commands not in our tracking - check for natural language patterns
         if len(args) >= 3:
@@ -503,41 +513,73 @@ When enabled, you can use natural language:
             return f"{cmd_type}"
 
     def execute_command(self, cmd_type: str, params: Dict[str, Any]):
-        """Execute command via MAVProxy"""
+        """Execute command via direct MAVLink"""
         try:
             if cmd_type == "ARM":
-                self._process_mavproxy("arm throttle")
+                # Direct MAVLink arm command
+                self.master.mav.command_long_send(
+                    self.target_system,
+                    self.target_component,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0,  # confirmation
+                    1,  # arm (1) / disarm (0)
+                    0, 0, 0, 0, 0, 0
+                )
+                print("AI Backend: ARM command sent")
 
             elif cmd_type == "DISARM":
-                self._process_mavproxy("disarm")
+                # Direct MAVLink disarm command
+                self.master.mav.command_long_send(
+                    self.target_system,
+                    self.target_component,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0,  # confirmation
+                    0,  # arm (1) / disarm (0)
+                    0, 0, 0, 0, 0, 0
+                )
+                print("AI Backend: DISARM command sent")
 
             elif cmd_type == "TAKEOFF":
                 altitude = params.get('altitude', 10)
-                self._process_mavproxy("mode GUIDED")
-                time.sleep(0.3)
+                # First ensure GUIDED mode
+                self._set_mode('GUIDED')
+                time.sleep(0.5)
+                # Then takeoff
                 self.master.mav.command_long_send(
                     self.target_system,
                     self.target_component,
                     mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
-                    0, 0, 0, 0, 0, 0, 0, altitude
+                    0,  # confirmation
+                    0,  # pitch
+                    0,  # empty
+                    0,  # empty
+                    0,  # yaw
+                    0,  # lat
+                    0,  # lon
+                    altitude  # altitude
                 )
+                print(f"AI Backend: TAKEOFF to {altitude}m command sent")
 
             elif cmd_type == "LAND":
-                self._process_mavproxy("mode LAND")
+                # Set LAND mode via MAVLink
+                self._set_mode('LAND')
 
             elif cmd_type == "RTL":
-                self._process_mavproxy("mode RTL")
+                # Set RTL mode via MAVLink
+                self._set_mode('RTL')
 
             elif cmd_type == "CHANGE_MODE":
-                mode = params.get('mode', '')
-                self._process_mavproxy(f"mode {mode}")
+                mode = params.get('mode', '').upper()
+                self._set_mode(mode)
 
             elif cmd_type == "GOTO":
                 lat = params.get('latitude')
                 lon = params.get('longitude')
                 alt = params.get('altitude', 0)
-                self._process_mavproxy("mode GUIDED")
-                time.sleep(0.2)
+                # Ensure GUIDED mode
+                self._set_mode('GUIDED')
+                time.sleep(0.3)
+                # Send position target
                 self.master.mav.mission_item_int_send(
                     self.target_system,
                     self.target_component,
@@ -547,9 +589,10 @@ When enabled, you can use natural language:
                     2, 0, 0, 0, 0, 0,
                     int(lat * 1e7), int(lon * 1e7), alt
                 )
+                print(f"AI Backend: GOTO {lat},{lon} at {alt}m sent")
 
             elif cmd_type == "GOTO_HOME":
-                self._process_mavproxy("mode RTL")
+                self._set_mode('RTL')
 
             elif cmd_type == "MOVE_DIRECTION":
                 direction = params.get('direction', '').lower()
@@ -563,13 +606,15 @@ When enabled, you can use natural language:
             elif cmd_type == "GET_PARAM":
                 param_name = params.get('parameter', '')
                 if param_name:
-                    self._process_mavproxy(f"param show {param_name}")
+                    self.master.param_fetch_one(param_name)
+                    print(f"AI Backend: Fetching param {param_name}")
 
             elif cmd_type == "SET_PARAM":
                 param_name = params.get('parameter', '')
                 value = params.get('value', 0)
                 if param_name:
-                    self._process_mavproxy(f"param set {param_name} {value}")
+                    self.master.param_set_send(param_name, float(value))
+                    print(f"AI Backend: Setting {param_name} = {value}")
 
             elif cmd_type == "REBOOT":
                 self.master.mav.command_long_send(
@@ -578,12 +623,65 @@ When enabled, you can use natural language:
                     mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
                     0, 1, 0, 0, 0, 0, 0, 0
                 )
+                print("AI Backend: REBOOT command sent")
 
             else:
                 print(f"AI Backend: Command {cmd_type} not implemented")
 
         except Exception as e:
             print(f"AI Backend: Execution error - {e}")
+
+    def _get_mode_id(self, mode_name: str) -> Optional[int]:
+        """Get mode ID from mode name"""
+        # ArduCopter mode mapping
+        mode_map = {
+            'STABILIZE': 0,
+            'ACRO': 1,
+            'ALT_HOLD': 2,
+            'AUTO': 3,
+            'GUIDED': 4,
+            'LOITER': 5,
+            'RTL': 6,
+            'CIRCLE': 7,
+            'LAND': 9,
+            'DRIFT': 11,
+            'SPORT': 13,
+            'FLIP': 14,
+            'AUTOTUNE': 15,
+            'POSHOLD': 16,
+            'BRAKE': 17,
+            'THROW': 18,
+            'AVOID_ADSB': 19,
+            'GUIDED_NOGPS': 20,
+            'SMART_RTL': 21,
+            'FLOWHOLD': 22,
+            'FOLLOW': 23,
+            'ZIGZAG': 24,
+            'SYSTEMID': 25,
+            'AUTOROTATE': 26,
+            'AUTO_RTL': 27,
+        }
+        return mode_map.get(mode_name.upper())
+
+    def _set_mode(self, mode_name: str):
+        """Set flight mode using MAVLink command"""
+        mode_id = self._get_mode_id(mode_name)
+        if mode_id is None:
+            print(f"AI Backend: Unknown mode '{mode_name}'")
+            return False
+
+        # Send SET_MODE command
+        self.master.mav.command_long_send(
+            self.target_system,
+            self.target_component,
+            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+            0,  # confirmation
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            mode_id,
+            0, 0, 0, 0, 0
+        )
+        print(f"AI Backend: Mode {mode_name} command sent")
+        return True
 
     def _move_direction(self, direction: str, distance: float):
         """Move in a cardinal direction"""
@@ -614,8 +712,9 @@ When enabled, you can use natural language:
                 print(f"AI Backend: Unknown direction '{direction}'")
                 return
 
-            self._process_mavproxy("mode GUIDED")
-            time.sleep(0.2)
+            # Ensure GUIDED mode
+            self._set_mode('GUIDED')
+            time.sleep(0.3)
             self.master.mav.mission_item_int_send(
                 self.target_system,
                 self.target_component,
@@ -625,6 +724,7 @@ When enabled, you can use natural language:
                 2, 0, 0, 0, 0, 0,
                 int(lat * 1e7), int(lon * 1e7), alt
             )
+            print(f"AI Backend: Moving {direction} {distance}m")
 
         except Exception as e:
             print(f"AI Backend: Move direction error - {e}")
@@ -642,8 +742,9 @@ When enabled, you can use natural language:
             current_alt = msg.relative_alt / 1000.0
             new_alt = max(0, current_alt + change)
 
-            self._process_mavproxy("mode GUIDED")
-            time.sleep(0.2)
+            # Ensure GUIDED mode
+            self._set_mode('GUIDED')
+            time.sleep(0.3)
             self.master.mav.mission_item_int_send(
                 self.target_system,
                 self.target_component,
@@ -653,6 +754,8 @@ When enabled, you can use natural language:
                 2, 0, 0, 0, 0, 0,
                 int(lat * 1e7), int(lon * 1e7), new_alt
             )
+            direction = "up" if change > 0 else "down"
+            print(f"AI Backend: Changing altitude {direction} {abs(change)}m to {new_alt}m")
 
         except Exception as e:
             print(f"AI Backend: Altitude change error - {e}")
