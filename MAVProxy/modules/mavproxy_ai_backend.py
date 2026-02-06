@@ -62,6 +62,7 @@ class AIBackendModule(mp_module.MPModule):
 
         # Store original input handler
         self.original_input_handler = None
+        self._handler_installed = False
 
         # Natural language indicators - words that suggest AI processing
         self.nl_indicators = {
@@ -193,18 +194,15 @@ When enabled, you can use natural language:
 
     def _install_input_handler(self):
         """Install our input handler to intercept all commands"""
-        if self.mpstate.functions.input_handler != self._input_handler:
-            self.original_input_handler = self.mpstate.functions.input_handler
-            self.mpstate.functions.input_handler = self._input_handler
-            if self.ai_settings.verbose:
-                print("AI Backend: Input handler installed")
+        self.original_input_handler = self.mpstate.functions.input_handler
+        self.mpstate.functions.input_handler = self._input_handler
+        self._handler_installed = True
 
     def _remove_input_handler(self):
         """Remove our input handler"""
-        if self.mpstate.functions.input_handler == self._input_handler:
+        if self._handler_installed:
             self.mpstate.functions.input_handler = self.original_input_handler
-            if self.ai_settings.verbose:
-                print("AI Backend: Input handler removed")
+            self._handler_installed = False
 
     def _input_handler(self, line):
         """
@@ -223,6 +221,11 @@ When enabled, you can use natural language:
             self.pending_command = None
             print("AI Backend: Command cancelled")
             return
+
+        # Fix common syntax: strip '=' from param commands
+        # "param set DISARM_DELAY = 40" → "param set DISARM_DELAY 40"
+        if line.lower().startswith('param ') and '=' in line:
+            line = line.replace('=', '').replace('  ', ' ').strip()
 
         # Check if this looks like natural language or a valid MAVProxy command
         if self._is_natural_language(line):
@@ -328,7 +331,7 @@ When enabled, you can use natural language:
     def show_status(self):
         """Display current status"""
         pending = self.pending_command['cmd_str'] if self.pending_command else "None"
-        handler = "Active" if self.mpstate.functions.input_handler is not None else "Inactive"
+        handler = "Active" if self._handler_installed else "Inactive"
         print(f"""AI Backend Status:
   Enabled:        {self.ai_settings.enabled}
   Backend URL:    {self.ai_settings.backend_url}
