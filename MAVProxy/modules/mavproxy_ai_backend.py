@@ -14,7 +14,7 @@ Usage:
     land now
 
 Author: ArduPilot AI Backend Team
-Version: 2.2.0
+Version: 2.3.0
 '''
 
 import time
@@ -360,13 +360,7 @@ When enabled, you can use natural language:
 
     def get_telemetry(self) -> Dict[str, Any]:
         """Gather current telemetry from MAVProxy"""
-        telemetry = {
-            "battery": {},
-            "gps": {},
-            "status": {},
-            "position": {},
-            "attitude": {}
-        }
+        telemetry = {}
 
         try:
             if 'SYS_STATUS' in self.master.messages:
@@ -402,6 +396,31 @@ When enabled, you can use natural language:
                     "longitude": msg.lon / 1e7,
                     "altitude": msg.alt / 1000.0,
                     "relative_altitude": msg.relative_alt / 1000.0
+                }
+
+            if 'ATTITUDE' in self.master.messages:
+                msg = self.master.messages['ATTITUDE']
+                import math
+                telemetry["attitude"] = {
+                    "roll": math.degrees(msg.roll),
+                    "pitch": math.degrees(msg.pitch),
+                    "yaw": math.degrees(msg.yaw)
+                }
+
+            if 'VFR_HUD' in self.master.messages:
+                msg = self.master.messages['VFR_HUD']
+                telemetry["speed"] = {
+                    "ground_speed": msg.groundspeed,
+                    "air_speed": msg.airspeed,
+                    "climb_rate": msg.climb
+                }
+
+            if 'HOME_POSITION' in self.master.messages:
+                msg = self.master.messages['HOME_POSITION']
+                telemetry["home"] = {
+                    "latitude": msg.latitude / 1e7,
+                    "longitude": msg.longitude / 1e7,
+                    "altitude": msg.altitude / 1000.0
                 }
 
         except Exception as e:
@@ -500,18 +519,29 @@ When enabled, you can use natural language:
             distance = params.get('distance', 0)
             return f"MOVE {direction.upper()} {distance}m"
         elif cmd_type == "ALTITUDE_CHANGE":
-            change = params.get('change', 0)
+            change = params.get('altitude_change', 0)
             direction = "UP" if change > 0 else "DOWN"
             return f"ALTITUDE {direction} {abs(change)}m"
         elif cmd_type == "GET_PARAM":
-            param = params.get('parameter', 'unknown')
+            param = params.get('name', 'unknown')
             return f"GET {param}"
         elif cmd_type == "SET_PARAM":
-            param = params.get('parameter', 'unknown')
+            param = params.get('name', 'unknown')
             value = params.get('value', 0)
             return f"SET {param}={value}"
+        elif cmd_type == "SET_SPEED":
+            speed = params.get('speed', 0)
+            return f"SPEED {speed} m/s"
+        elif cmd_type == "SET_YAW":
+            heading = params.get('heading', 0)
+            return f"YAW {heading}°"
         elif cmd_type == "REBOOT":
             return "REBOOT"
+        elif cmd_type == "LUA_SCRIPT":
+            desc = params.get('description', 'custom script')
+            return f"LUA: {desc}"
+        elif cmd_type == "ERROR":
+            return f"ERROR: {params.get('message', 'unknown')}"
         else:
             return f"{cmd_type}"
 
@@ -591,21 +621,46 @@ When enabled, you can use natural language:
                 self._move_direction(direction, distance)
 
             elif cmd_type == "ALTITUDE_CHANGE":
-                change = params.get('change', 0)
+                change = params.get('altitude_change', 0)
                 self._change_altitude(change)
 
             elif cmd_type == "GET_PARAM":
-                param_name = params.get('parameter', '')
+                param_name = params.get('name', '')
                 if param_name:
                     self.master.param_fetch_one(param_name)
                     print(f"AI Backend: Fetching param {param_name}")
 
             elif cmd_type == "SET_PARAM":
-                param_name = params.get('parameter', '')
+                param_name = params.get('name', '')
                 value = params.get('value', 0)
                 if param_name:
                     self.master.param_set_send(param_name, float(value))
                     print(f"AI Backend: Setting {param_name} = {value}")
+
+            elif cmd_type == "SET_SPEED":
+                speed = params.get('speed', 0)
+                if speed > 0:
+                    # MAV_CMD_DO_CHANGE_SPEED: speed_type=1 (ground), speed, throttle=-1 (no change)
+                    self.master.mav.command_long_send(
+                        self.target_system,
+                        self.target_component,
+                        mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+                        0, 1, speed, -1, 0, 0, 0, 0
+                    )
+                    print(f"AI Backend: Speed set to {speed} m/s")
+
+            elif cmd_type == "SET_YAW":
+                heading = params.get('heading', 0)
+                # MAV_CMD_CONDITION_YAW: angle, rate(deg/s), direction(1=CW,-1=CCW), relative(0=abs,1=rel)
+                self._set_mode('GUIDED')
+                time.sleep(0.3)
+                self.master.mav.command_long_send(
+                    self.target_system,
+                    self.target_component,
+                    mavutil.mavlink.MAV_CMD_CONDITION_YAW,
+                    0, heading, 0, 0, 0, 0, 0, 0
+                )
+                print(f"AI Backend: YAW to {heading}° sent")
 
             elif cmd_type == "REBOOT":
                 self.master.mav.command_long_send(
@@ -615,6 +670,10 @@ When enabled, you can use natural language:
                     0, 1, 0, 0, 0, 0, 0, 0
                 )
                 print("AI Backend: REBOOT command sent")
+
+            elif cmd_type == "ERROR":
+                msg = params.get('message', 'Unknown error')
+                print(f"AI Backend: Command error - {msg}")
 
             else:
                 print(f"AI Backend: Command {cmd_type} not implemented")
