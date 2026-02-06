@@ -250,8 +250,8 @@ When enabled, you can use natural language:
         saved_handler = self.mpstate.functions.input_handler
         self.mpstate.functions.input_handler = None
         try:
-            # Use MAVProxy's process_stdin function
-            self.mpstate.functions.process_stdin(line)
+            # immediate=True processes NOW, not queued (queue would re-hit our handler)
+            self.mpstate.functions.process_stdin(line, immediate=True)
         finally:
             # Reinstall our handler
             self.mpstate.functions.input_handler = saved_handler
@@ -328,7 +328,7 @@ When enabled, you can use natural language:
     def show_status(self):
         """Display current status"""
         pending = self.pending_command['cmd_str'] if self.pending_command else "None"
-        handler = "Active" if self.mpstate.functions.input_handler == self._input_handler else "Inactive"
+        handler = "Active" if self.mpstate.functions.input_handler is not None else "Inactive"
         print(f"""AI Backend Status:
   Enabled:        {self.ai_settings.enabled}
   Backend URL:    {self.ai_settings.backend_url}
@@ -541,31 +541,20 @@ When enabled, you can use natural language:
 
             elif cmd_type == "TAKEOFF":
                 altitude = params.get('altitude', 10)
-                # First ensure GUIDED mode
                 self._set_mode('GUIDED')
                 time.sleep(0.5)
-                # Then takeoff
                 self.master.mav.command_long_send(
                     self.target_system,
                     self.target_component,
                     mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
-                    0,  # confirmation
-                    0,  # pitch
-                    0,  # empty
-                    0,  # empty
-                    0,  # yaw
-                    0,  # lat
-                    0,  # lon
-                    altitude  # altitude
+                    0, 0, 0, 0, 0, 0, 0, altitude
                 )
-                print(f"AI Backend: TAKEOFF to {altitude}m command sent")
+                print(f"AI Backend: TAKEOFF to {altitude}m sent")
 
             elif cmd_type == "LAND":
-                # Set LAND mode via MAVLink
                 self._set_mode('LAND')
 
             elif cmd_type == "RTL":
-                # Set RTL mode via MAVLink
                 self._set_mode('RTL')
 
             elif cmd_type == "CHANGE_MODE":
@@ -576,7 +565,6 @@ When enabled, you can use natural language:
                 lat = params.get('latitude')
                 lon = params.get('longitude')
                 alt = params.get('altitude', 0)
-                # Ensure GUIDED mode
                 self._set_mode('GUIDED')
                 time.sleep(0.3)
                 # Send position target
@@ -760,9 +748,21 @@ When enabled, you can use natural language:
         except Exception as e:
             print(f"AI Backend: Altitude change error - {e}")
 
+    def _update_prompt(self):
+        """Update MAVProxy prompt with current flight mode"""
+        try:
+            mode = self.master.flightmode
+            if mode and hasattr(self.mpstate, 'rl'):
+                self.mpstate.rl.set_prompt(mode + "> ")
+        except:
+            pass
+
     def idle_task(self):
         """Periodic tasks"""
         if self.ai_settings.enabled:
+            # Keep prompt updated (input_handler blocks normal prompt updates)
+            self._update_prompt()
+
             now = time.time()
             if now - self.last_health_check > self.health_check_interval:
                 self.last_health_check = now
