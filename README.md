@@ -1,6 +1,14 @@
 ![GitHub Actions](https://github.com/ardupilot/MAVProxy/actions/workflows/windows_build.yml/badge.svg)
 
-MAVProxy
+# MAVProxy (AI Edition)
+
+> **🚀 ArduPilot AI Backend Integration**
+> This is a special fork of MAVProxy that features natural language drone control.
+> 
+> **Main Project & Setup Instructions:** [ArduPilot AI Backend](https://github.com/deepak61296/ardupilot-ai-backend)
+> **Active Branch:** `feature/ai-backend-integration` (This is the default branch for this fork).
+
+---
 
 This is a MAVLink ground station written in python. 
 
