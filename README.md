@@ -8,6 +8,8 @@
 > **Main Project & Setup Instructions:** [ArduPilot AI Backend](https://github.com/deepak61296/ardupilot-ai-backend)
 > **Active Branch:** `feature/ai-backend-integration` (This is the default branch for this fork).
 
+[![MAVProxy Demo](https://img.youtube.com/vi/8ATi4Uj1ndc/0.jpg)](https://www.youtube.com/watch?v=8ATi4Uj1ndc)
+
 ---
 
 This is a MAVLink ground station written in python. 
